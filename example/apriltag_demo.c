@@ -1,10 +1,13 @@
-/* (C) 2013-2015, The Regents of The University of Michigan
+/* (C) 2013-2016, The Regents of The University of Michigan
 All rights reserved.
 
-This software may be available under alternative licensing
-terms. Contact Edwin Olson, ebolson@umich.edu, for more information.
+This software was developed in the APRIL Robotics Lab under the
+direction of Edwin Olson, ebolson@umich.edu. This software may be
+available under alternative licensing terms; contact the address
+above.
 
-   Redistribution and use in source and binary forms, with or without
+   BSD
+Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
 
 1. Redistributions of source code must retain the above copyright notice, this
@@ -35,16 +38,14 @@ either expressed or implied, of the FreeBSD Project.
 #include <ctype.h>
 #include <unistd.h>
 
-#include "apriltag.h"
-#include "image_u8.h"
-#include "tag36h11.h"
-#include "tag36h10.h"
-#include "tag36artoolkit.h"
-#include "tag25h9.h"
-#include "tag25h7.h"
+#include "apriltag/apriltag.h"
+#include "apriltag/tag36h11.h"
+#include "apriltag/tag36h10.h"
+#include "apriltag/tag36artoolkit.h"
+#include "apriltag/tag25h9.h"
+#include "apriltag/tag25h7.h"
 
-#include "zarray.h"
-#include "getopt.h"
+#include "apriltag/common/getopt.h"
 
 // Invoke:
 //
@@ -63,6 +64,7 @@ int main(int argc, char *argv[])
     getopt_add_int(getopt, 't', "threads", "4", "Use this many CPU threads");
     getopt_add_double(getopt, 'x', "decimate", "1.0", "Decimate input image by this factor");
     getopt_add_double(getopt, 'b', "blur", "0.0", "Apply low-pass blur to input");
+    getopt_add_bool(getopt, '0', "refine-edges", 1, "Spend more time trying to align edges of tags");
     getopt_add_bool(getopt, '1', "refine-decode", 0, "Spend more time trying to decode tags");
     getopt_add_bool(getopt, '2', "refine-pose", 0, "Spend more time trying to precisely localize tags");
 
@@ -99,6 +101,7 @@ int main(int argc, char *argv[])
     td->quad_sigma = getopt_get_double(getopt, "blur");
     td->nthreads = getopt_get_int(getopt, "threads");
     td->debug = getopt_get_bool(getopt, "debug");
+    td->refine_edges = getopt_get_bool(getopt, "refine-edges");
     td->refine_decode = getopt_get_bool(getopt, "refine-decode");
     td->refine_pose = getopt_get_bool(getopt, "refine-pose");
 
@@ -125,7 +128,7 @@ int main(int argc, char *argv[])
 
             image_u8_t *im = image_u8_create_from_pnm(path);
             if (im == NULL) {
-                printf("couldn't find %s\n", path);
+                printf("couldn't load %s\n", path);
                 continue;
             }
 

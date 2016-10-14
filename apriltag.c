@@ -1,10 +1,13 @@
-/* (C) 2013-2015, The Regents of The University of Michigan
+/* (C) 2013-2016, The Regents of The University of Michigan
 All rights reserved.
 
-This software may be available under alternative licensing
-terms. Contact Edwin Olson, ebolson@umich.edu, for more information.
+This software was developed in the APRIL Robotics Lab under the
+direction of Edwin Olson, ebolson@umich.edu. This software may be
+available under alternative licensing terms; contact the address
+above.
 
-   Redistribution and use in source and binary forms, with or without
+   BSD
+Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
 
 1. Redistributions of source code must retain the above copyright notice, this
@@ -40,14 +43,13 @@ either expressed or implied, of the FreeBSD Project.
 #include <sys/time.h>
 
 #include "common/image_u8.h"
-#include "common/image_u32.h"
 #include "common/zhash.h"
 #include "common/zarray.h"
 #include "common/matd.h"
 #include "common/homography.h"
 #include "common/timeprofile.h"
 #include "common/math_util.h"
-#include "g2d.h"
+#include "common/g2d.h"
 
 #include "common/postscript_utils.h"
 
@@ -271,34 +273,18 @@ static inline int detection_compare_function(const void *_a, const void *_b)
     return a->id - b->id;
 }
 
-static uint32_t rgb_scale(uint32_t rgb, float a)
-{
-    int r = (rgb >> 16)&0xff;
-    int g = (rgb >> 8)&0xff;
-    int b = (rgb >> 0)&0xff;
-
-    r *= a;
-    g *= a;
-    b *= a;
-
-    return (r<<16) | (g<<8) | b;
-}
-
 void apriltag_detector_remove_family(apriltag_detector_t *td, apriltag_family_t *fam)
 {
     quick_decode_uninit(fam);
     zarray_remove_value(td->tag_families, &fam, 0);
 }
 
-void apriltag_detector_add_family(apriltag_detector_t *td, apriltag_family_t *fam)
+void apriltag_detector_add_family_bits(apriltag_detector_t *td, apriltag_family_t *fam, int bits_corrected)
 {
     zarray_add(td->tag_families, &fam);
 
-    // XXX Tunable, but really, 2 is a good choice. Values of >=3
-    // consume prohibitively large amounts of memory, and otherwise
-    // you want the largest value possible.
     if (!fam->impl)
-        quick_decode_init(fam, 2);
+        quick_decode_init(fam, bits_corrected);
 }
 
 void apriltag_detector_clear_families(apriltag_detector_t *td)
@@ -316,6 +302,8 @@ apriltag_detector_t *apriltag_detector_create()
     apriltag_detector_t *td = (apriltag_detector_t*) calloc(1, sizeof(apriltag_detector_t));
 
     td->nthreads = 1;
+    td->quad_decimate = 1.0;
+    td->quad_sigma = 0.0;
 
     td->qtp.max_nmaxima = 10;
     td->qtp.min_cluster_pixels = 5;
@@ -331,6 +319,7 @@ apriltag_detector_t *apriltag_detector_create()
 
     td->tp = timeprofile_create();
 
+    td->refine_edges = 1;
     td->refine_pose = 0;
     td->refine_decode = 0;
 
@@ -376,15 +365,18 @@ struct evaluate_quad_ret
     struct quick_decode_entry e;
 };
 
-void quad_update_homographies(struct quad *quad)
+// returns non-zero if an error occurs (i.e., H has no inverse)
+int quad_update_homographies(struct quad *quad)
 {
     zarray_t *correspondences = zarray_create(sizeof(float[4]));
 
     for (int i = 0; i < 4; i++) {
         float corr[4];
 
+        // NOTE: y is reversed because our camera frame is x right y up,
+        // while the image pixels are ordered x right y down
         corr[0] = (i==0 || i==3) ? -1 : 1;
-        corr[1] = (i==0 || i==1) ? -1 : 1;
+        corr[1] = (i==0 || i==1) ? 1 : -1;
         corr[2] = quad->p[i][0];
         corr[3] = quad->p[i][1];
 
@@ -399,8 +391,12 @@ void quad_update_homographies(struct quad *quad)
     // XXX Tunable
     quad->H = homography_compute(correspondences, HOMOGRAPHY_COMPUTE_FLAG_SVD);
     quad->Hinv = matd_inverse(quad->H);
-
     zarray_destroy(correspondences);
+
+    if (quad->H && quad->Hinv)
+        return 0;
+
+    return -1;
 }
 
 // compute a "score" for a quad that is independent of tag family
@@ -508,8 +504,12 @@ double quad_goodness(apriltag_family_t *family, image_u8_t *im, struct quad *qua
         }
     }
 
+
     // score = average margin between white and black pixels near border.
-    return 1.0 * W1 / Wn - 1.0 * B1 / Bn;
+    double margin = 1.0 * W1 / Wn - 1.0 * B1 / Bn;
+//    printf("margin %f: W1 %f, B1 %f\n", margin, W1, B1);
+
+    return margin;
 }
 
 // returns the decision margin.
@@ -586,7 +586,7 @@ float quad_decode(apriltag_family_t *family, image_u8_t *im, struct quad *quad, 
             double tagy01 = (pattern[1] + i*pattern[3]) / (2*family->black_border + family->d);
 
             double tagx = 2*(tagx01-0.5);
-            double tagy = 2*(tagy01-0.5);
+            double tagy = -2*(tagy01-0.5);
 
             double px, py;
             homography_project(quad->H, tagx, tagy, &px, &py);
@@ -608,8 +608,12 @@ float quad_decode(apriltag_family_t *family, image_u8_t *im, struct quad *quad, 
 
     // compute the average decision margin (how far was each bit from
     // the decision boundary?
-    float score = 0;
-    float score_count = 0;
+    //
+    // we score this separately for white and black pixels and return
+    // the minimum average threshold for black/white pixels. This is
+    // to penalize thresholds that are too close to an extreme.
+    float black_score = 0, white_score = 0;
+    float black_score_count = 1, white_score_count = 1;
 
     for (int bitidx = 0; bitidx < family->d * family->d; bitidx++) {
         int bitx = bitidx % family->d;
@@ -620,7 +624,7 @@ float quad_decode(apriltag_family_t *family, image_u8_t *im, struct quad *quad, 
 
         // scale to [-1, 1]
         double tagx = 2*(tagx01-0.5);
-        double tagy = 2*(tagy01-0.5);
+        double tagy = -2*(tagy01-0.5);
 
         double px, py;
         homography_project(quad->H, tagx, tagy, &px, &py);
@@ -637,17 +641,18 @@ float quad_decode(apriltag_family_t *family, image_u8_t *im, struct quad *quad, 
         int v = im->buf[iy*im->stride + ix];
 
         if (v > thresh) {
-            score += (v - thresh);
-            score_count ++;
+            white_score += (v - thresh);
+            white_score_count ++;
             rcode |= 1;
         } else {
-            score += (thresh - v);
-            score_count ++;
+            black_score += (thresh - v);
+            black_score_count ++;
         }
     }
 
     quick_decode_codeword(family, rcode, entry);
-    return score / score_count;
+
+    return fmin(white_score / white_score_count, black_score / black_score_count);
 }
 
 double score_goodness(apriltag_family_t *family, image_u8_t *im, struct quad *quad, void *user)
@@ -708,7 +713,8 @@ double optimize_quad_generic(apriltag_family_t *family, image_u8_t *im, struct q
                         struct quad *this_quad = quad_copy(best_quad);
                         this_quad->p[i][0] = best_quad->p[i][0] + sx*stepsize;
                         this_quad->p[i][1] = best_quad->p[i][1] + sy*stepsize;
-                        quad_update_homographies(this_quad);
+                        if (quad_update_homographies(this_quad))
+                            continue;
 
                         double this_score = score(family, im, this_quad, user);
 
@@ -740,6 +746,140 @@ double optimize_quad_generic(apriltag_family_t *family, image_u8_t *im, struct q
     return best_score;
 }
 
+static void refine_edges(apriltag_detector_t *td, image_u8_t *im_orig, struct quad *quad)
+{
+    double lines[4][4]; // for each line, [Ex Ey nx ny]
+
+    for (int edge = 0; edge < 4; edge++) {
+        int a = edge, b = (edge + 1) & 3; // indices of the end points.
+
+        // compute the normal to the current line estimate
+        double nx = quad->p[b][1] - quad->p[a][1];
+        double ny = -quad->p[b][0] + quad->p[a][0];
+        double mag = sqrt(nx*nx + ny*ny);
+        nx /= mag;
+        ny /= mag;
+
+        // we will now fit a NEW line by sampling points near
+        // our original line that have large gradients. On really big tags,
+        // we're willing to sample more to get an even better estimate.
+        int nsamples = imax(16, mag / 8); // XXX tunable
+
+        // stats for fitting a line...
+        double Mx = 0, My = 0, Mxx = 0, Mxy = 0, Myy = 0, N = 0;
+
+        for (int s = 0; s < nsamples; s++) {
+            // compute a point along the line... Note, we're avoiding
+            // sampling *right* at the corners, since those points are
+            // the least reliable.
+            double alpha = (1.0 + s) / (nsamples + 1);
+            double x0 = alpha*quad->p[a][0] + (1-alpha)*quad->p[b][0];
+            double y0 = alpha*quad->p[a][1] + (1-alpha)*quad->p[b][1];
+
+            // search along the normal to this line, looking at the
+            // gradients along the way. We're looking for a strong
+            // response.
+            double Mn = 0;
+            double Mcount = 0;
+
+            // XXX tunable: how far to search?  We want to search far
+            // enough that we find the best edge, but not so far that
+            // we hit other edges that aren't part of the tag. We
+            // shouldn't ever have to search more than quad_decimate,
+            // since otherwise we would (ideally) have started our
+            // search on another pixel in the first place. Likewise,
+            // for very small tags, we don't want the range to be too
+            // big.
+            double range = fmin(td->quad_decimate + 1, mag / 10);
+
+            // XXX tunable step size.
+            for (double n = -range; n <= range; n +=  0.25) {
+                // Because of the guaranteed winding order of the
+                // points in the quad, we will start inside the white
+                // portion of the quad and work our way outward.
+                //
+                // sample to points (x1,y1) and (x2,y2) XXX tunable:
+                // how far +/- to look? Small values compute the
+                // gradient more precisely, but are more sensitive to
+                // noise.
+                double grange = 1;
+                int x1 = x0 + (n + grange)*nx;
+                int y1 = y0 + (n + grange)*ny;
+                if (x1 < 0 || x1 >= im_orig->width || y1 < 0 || y1 >= im_orig->height)
+                    continue;
+
+                int x2 = x0 + (n - grange)*nx;
+                int y2 = y0 + (n - grange)*ny;
+                if (x2 < 0 || x2 >= im_orig->width || y2 < 0 || y2 >= im_orig->height)
+                    continue;
+
+                int g1 = im_orig->buf[y1*im_orig->stride + x1];
+                int g2 = im_orig->buf[y2*im_orig->stride + x2];
+
+                if (g1 < g2) // reject points whose gradient is "backwards". They can only hurt us.
+                    continue;
+
+                double weight = (g2 - g1)*(g2 - g1); // XXX tunable. What shape for weight=f(g2-g1)?
+
+                // compute weighted average of the gradient at this point.
+                Mn += weight*n;
+                Mcount += weight;
+            }
+
+            // what was the average point along the line?
+            double n0 = Mn / Mcount;
+
+            // where is the point along the line?
+            double bestx = x0 + n0*nx;
+            double besty = y0 + n0*ny;
+
+            // update our line fit statistics
+            Mx += bestx;
+            My += besty;
+            Mxx += bestx*bestx;
+            Mxy += bestx*besty;
+            Myy += besty*besty;
+            N++;
+        }
+
+        // fit a line
+        double Ex = Mx / N, Ey = My / N;
+        double Cxx = Mxx / N - Ex*Ex;
+        double Cxy = Mxy / N - Ex*Ey;
+        double Cyy = Myy / N - Ey*Ey;
+
+        double normal_theta = .5 * atan2f(-2*Cxy, (Cyy - Cxx));
+        nx = cosf(normal_theta);
+        ny = sinf(normal_theta);
+        lines[edge][0] = Ex;
+        lines[edge][1] = Ey;
+        lines[edge][2] = nx;
+        lines[edge][3] = ny;
+    }
+
+    // now refit the corners of the quad
+    for (int i = 0; i < 4; i++) {
+        // solve for the intersection of lines (i) and (i+1)&3.
+        double A00 =  lines[i][3],  A01 = -lines[(i+1)&3][3];
+        double A10 =  -lines[i][2],  A11 = lines[(i+1)&3][2];
+        double B0 = -lines[i][0] + lines[(i+1)&3][0];
+        double B1 = -lines[i][1] + lines[(i+1)&3][1];
+
+        double det = A00 * A11 - A10 * A01;
+
+        // inverse.
+        double W00 = A11 / det, W01 = -A01 / det;
+        if (fabs(det) > 0.001) {
+            // solve
+            double L0 = W00*B0 + W01*B1;
+
+            // compute intersection
+            quad->p[i][0] = lines[i][0] + L0*A00;
+            quad->p[i][1] = lines[i][1] + L0*A10;
+        }
+    }
+}
+
 static void quad_decode_task(void *_u)
 {
     struct quad_decode_task *task = (struct quad_decode_task*) _u;
@@ -750,8 +890,16 @@ static void quad_decode_task(void *_u)
         struct quad *quad_original;
         zarray_get_volatile(task->quads, quadidx, &quad_original);
 
+        // refine edges is not dependent upon the tag family, thus
+        // apply this optimization BEFORE the other work.
+        //if (td->quad_decimate > 1 && td->refine_edges) {
+        if (td->refine_edges) {
+            refine_edges(td, im, quad_original);
+        }
+
         // make sure the homographies are computed...
-        quad_update_homographies(quad_original);
+        if (quad_update_homographies(quad_original))
+            continue;
 
         for (int famidx = 0; famidx < zarray_size(td->tag_families); famidx++) {
             apriltag_family_t *family;
@@ -1074,7 +1222,7 @@ zarray_t *apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig)
                     // the tags overlap. Delete one, keep the other.
 
                     if (det0->hamming < det1->hamming ||
-                        (det0->hamming == det1->hamming && det0->goodness > det1->goodness)) {
+                        (det0->hamming == det1->hamming && det0->decision_margin > det1->decision_margin)) {
                         // keep det0, destroy det1
                         apriltag_detection_destroy(det1);
                         zarray_remove_index(detections, i1, 1);
@@ -1117,44 +1265,6 @@ zarray_t *apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig)
         fprintf(f, "0 %d translate\n", darker->height);
         fprintf(f, "1 -1 scale\n");
         postscript_image(f, darker);
-
-        image_u32_t *out = image_u32_create_from_u8(darker);
-        for (int detidx = 0; detidx < zarray_size(detections); detidx++) {
-            apriltag_detection_t *det;
-            zarray_get(detections, detidx, &det);
-
-            if (det->hamming > 3)
-                continue;
-
-            // d |----| c
-            //   |    |
-            //   |    |
-            // a |----| b
-
-            double a[2], b[2], c[2], d[2];
-
-            homography_project(det->H, -1, -1, &a[0], &a[1]);
-            homography_project(det->H,  1, -1, &b[0], &b[1]);
-            homography_project(det->H,  1,  1, &c[0], &c[1]);
-            homography_project(det->H, -1,  1, &d[0], &d[1]);
-
-            float scale = ((float[]) {1.0, 0.6, 0.3, 0.1 })[det->hamming];
-
-            image_u32_draw_line(out, a[0], a[1], b[0], b[1], rgb_scale(0xff0000, scale), 3);
-            image_u32_draw_line(out, a[0], a[1], d[0], d[1], rgb_scale(0x00ff00, scale), 3);
-            image_u32_draw_line(out, b[0], b[1], c[0], c[1], rgb_scale(0xff88ff, scale), 3);
-            image_u32_draw_line(out, d[0], d[1], c[0], c[1], rgb_scale(0x88ffff, scale), 3);
-
-            fprintf(f, "1 0 0 setrgbcolor %f %f moveto %f %f lineto stroke\n", a[0], a[1], b[0], b[1]);
-            fprintf(f, "0 1 0 setrgbcolor %f %f moveto %f %f lineto stroke\n", a[0], a[1], d[0], d[1]);
-            fprintf(f, "1 .5 1 setrgbcolor %f %f moveto %f %f lineto stroke\n", b[0], b[1], c[0], c[1]);
-            fprintf(f, ".5 1 1 setrgbcolor %f %f moveto %f %f lineto stroke\n", d[0], d[1], c[0], c[1]);
-        }
-
-        image_u32_write_pnm(out, "debug_output.pnm");
-
-        image_u8_destroy(darker);
-        image_u32_destroy(out);
 
         fclose(f);
     }
@@ -1227,4 +1337,35 @@ void apriltag_detections_destroy(zarray_t *detections)
     }
 
     zarray_destroy(detections);
+}
+
+image_u8_t *apriltag_to_image(apriltag_family_t *fam, int idx)
+{
+    assert(fam != NULL);
+    assert(idx >= 0 && idx < fam->ncodes);
+
+    uint64_t code = fam->codes[idx];
+    int border = fam->black_border + 1;
+    int dim = fam->d + 2*border;
+    image_u8_t *im = image_u8_create(dim, dim);
+
+    // Make 1px white border
+    for (int i = 0; i < dim; i += 1) {
+        im->buf[i] = 255;
+        im->buf[(dim-1)*im->stride + i] = 255;
+        im->buf[i*im->stride] = 255;
+        im->buf[i*im->stride + (dim-1)] = 255;
+    }
+
+    for (int y = 0; y < fam->d; y += 1) {
+        for (int x = 0; x < fam->d; x += 1) {
+            int pos = (fam->d-1 - y) * fam->d + (fam->d-1 - x);
+            if ((code >> pos) & 0x1) {
+                int i = (y+border)*im->stride + x+border;
+                im->buf[i] = 255;
+            }
+        }
+    }
+
+    return im;
 }

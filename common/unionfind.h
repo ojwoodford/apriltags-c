@@ -1,10 +1,13 @@
-/* (C) 2013-2015, The Regents of The University of Michigan
+/* (C) 2013-2016, The Regents of The University of Michigan
 All rights reserved.
 
-This software may be available under alternative licensing
-terms. Contact Edwin Olson, ebolson@umich.edu, for more information.
+This software was developed in the APRIL Robotics Lab under the
+direction of Edwin Olson, ebolson@umich.edu. This software may be
+available under alternative licensing terms; contact the address
+above.
 
-   Redistribution and use in source and binary forms, with or without
+   BSD
+Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
 
 1. Redistributions of source code must retain the above copyright notice, this
@@ -83,7 +86,7 @@ static inline uint32_t unionfind_get_representative(unionfind_t *uf, uint32_t id
     // otherwise, recurse
     uint32_t root = unionfind_get_representative(uf, uf->data[id].parent);
 
-    // short circuit the path. [XXX This write prevents tail recursion?]
+    // short circuit the path. [XXX This write prevents tail recursion]
     uf->data[id].parent = root;
 
     return root;
@@ -102,7 +105,10 @@ static inline uint32_t unionfind_get_representative(unionfind_t *uf, uint32_t id
     }
 
     // go back and collapse the tree.
-// WTF, faster with this commented out?
+    //
+    // XXX: on some of our workloads that have very shallow trees
+    // (e.g. image segmentation), we are actually faster not doing
+    // this...
     while (uf->data[id].parent != root) {
         uint32_t tmp = uf->data[id].parent;
         uf->data[id].parent = root;
