@@ -111,6 +111,7 @@ target/
 *.so
 *.so.*
 *.dylib
+*.mex*
 
 # Executables
 *.exe
