@@ -27,7 +27,7 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     
     /* Set up the detector */
     tf = tag36h11_create();
-    tf->black_border = 0;
+    tf->black_border = 1;
     td = apriltag_detector_create();
     apriltag_detector_add_family(td, tf);
     td->quad_decimate = 1;
@@ -35,8 +35,8 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     td->nthreads = 1;
     td->debug = 0;
     td->refine_edges = 1;
-    td->refine_decode = 1;
-    td->refine_pose = 1;
+    td->refine_decode = 0;
+    td->refine_pose = 0;
 
     /* Do the detection */
     detections = apriltag_detector_detect(td, &im);
@@ -45,7 +45,7 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     plhs[0] = mxCreateNumericMatrix(12, zarray_size(detections), mxDOUBLE_CLASS, mxREAL);
     out = (double*)mxGetData(plhs[0]);
     for (i = 0; i < zarray_size(detections); ++i, out += 12) {
-        zarray_get_volatile(detections, i, &det);
+        zarray_get(detections, i, &det);
         out[0] = det->p[0][0];
         out[1] = det->p[0][1];
         out[2] = det->p[1][0];
@@ -54,10 +54,10 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
         out[5] = det->p[2][1];
         out[6] = det->p[3][0];
         out[7] = det->p[3][1];
-        out[8] = (double)det->id;
-        out[9] = (double)det->hamming;
-        out[10] = (double)det->goodness;
-        out[11] = (double)det->decision_margin;
+        out[8] = (double)(det->id);
+        out[9] = (double)(det->hamming);
+        out[10] = (double)(det->goodness);
+        out[11] = (double)(det->decision_margin);
     }
 
     // Deallocations

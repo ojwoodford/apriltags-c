@@ -38,14 +38,14 @@ either expressed or implied, of the FreeBSD Project.
 #include <ctype.h>
 #include <unistd.h>
 
-#include "apriltag/apriltag.h"
-#include "apriltag/tag36h11.h"
-#include "apriltag/tag36h10.h"
-#include "apriltag/tag36artoolkit.h"
-#include "apriltag/tag25h9.h"
-#include "apriltag/tag25h7.h"
+#include "apriltag.h"
+#include "tag36h11.h"
+#include "tag36h10.h"
+#include "tag36artoolkit.h"
+#include "tag25h9.h"
+#include "tag25h7.h"
 
-#include "apriltag/common/getopt.h"
+#include "common/getopt.h"
 
 // Invoke:
 //
@@ -139,8 +139,8 @@ int main(int argc, char *argv[])
                 zarray_get(detections, i, &det);
 
                 if (!quiet)
-                    printf("detection %3d: id (%2dx%2d)-%-4d, hamming %d, goodness %8.3f, margin %8.3f\n",
-                           i, det->family->d*det->family->d, det->family->h, det->id, det->hamming, det->goodness, det->decision_margin);
+                    printf("detection %3d: id (%2dx%2d)-%-4d, hamming %d, goodness %8.3f, margin %8.3f. Coordinates: (%g,%g), (%g,%g), (%g,%g), (%g,%g)\n",
+                           i, det->family->d*det->family->d, det->family->h, det->id, det->hamming, det->goodness, det->decision_margin, det->p[0][0], det->p[0][1], det->p[1][0], det->p[1][1], det->p[2][0], det->p[2][1], det->p[3][0], det->p[3][1]);
 
                 hamm_hist[det->hamming]++;
             }
