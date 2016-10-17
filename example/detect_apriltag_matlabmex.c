@@ -30,7 +30,7 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     tf->black_border = 1;
     td = apriltag_detector_create();
     apriltag_detector_add_family(td, tf);
-    td->quad_decimate = 1;
+    td->quad_decimate = 3;
     td->quad_sigma = 0.0;
     td->nthreads = 1;
     td->debug = 0;
