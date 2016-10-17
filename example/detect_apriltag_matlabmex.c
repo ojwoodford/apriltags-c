@@ -30,8 +30,8 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     tf->black_border = 0;
     td = apriltag_detector_create();
     apriltag_detector_add_family(td, tf);
-    td->quad_decimate = 0;
-    td->quad_sigma = 0.5;
+    td->quad_decimate = 1;
+    td->quad_sigma = 0.0;
     td->nthreads = 1;
     td->debug = 0;
     td->refine_edges = 1;
@@ -42,7 +42,8 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     detections = apriltag_detector_detect(td, &im);
 
     /* Output the detections */
-    prhs[0] = mxCreateNumericMatrix(12, zarray_size(detections), mxDOUBLE_CLASS, mxREAL); 
+    plhs[0] = mxCreateNumericMatrix(12, zarray_size(detections), mxDOUBLE_CLASS, mxREAL);
+    out = (double*)mxGetData(plhs[0]);
     for (i = 0; i < zarray_size(detections); ++i, out += 12) {
         zarray_get_volatile(detections, i, &det);
         out[0] = det->p[0][0];
